@@ -23,7 +23,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Use your camera to photograph book covers and read English words on book pages. Images stay on your device.</string>
+	<string>Use your camera to photograph book covers and read words on book pages. Images stay on your device.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
