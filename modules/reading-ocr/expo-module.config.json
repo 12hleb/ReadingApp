@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["ReadingOCRModule"] },
+  "android": { "modules": ["com.readingtranslator.ocr.ReadingOCRModule"] }
+}

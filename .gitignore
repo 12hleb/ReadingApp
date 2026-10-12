@@ -1,0 +1,10 @@
+node_modules/
+.expo/
+dist/
+coverage/
+/ios/
+/android/
+.env
+.env.*
+!.env.example
+*.log
