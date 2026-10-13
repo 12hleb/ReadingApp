@@ -21,8 +21,11 @@ enum SaveWordResult {
 struct VocabularyRepository {
     let context: ModelContext
 
-    static func duplicateKey(_ text: String) -> String {
-        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+    static func duplicateKey(_ text: String, language: ReaderLanguage = .english) -> String {
+        // Accents can distinguish words in Spanish and Russian (e.g. sí/si).
+        let options: String.CompareOptions = language == .english
+            ? [.caseInsensitive, .diacriticInsensitive] : [.caseInsensitive]
+        return text.folding(options: options, locale: Locale(identifier: language.rawValue))
             .split(whereSeparator: \.isWhitespace).joined(separator: " ")
             .trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
     }
@@ -37,17 +40,22 @@ struct VocabularyRepository {
         catch { context.rollback(); throw error }
     }
 
-    func saveWord(original: String, translation: String, sentence: String?, in book: Book) throws -> SaveWordResult {
+    func saveWord(original: String, translation: String, sentence: String?, in book: Book,
+                  sourceLanguage: ReaderLanguage = .english, targetLanguage: ReaderLanguage = .russian) throws -> SaveWordResult {
         let original = original.trimmingCharacters(in: .whitespacesAndNewlines)
         let translation = translation.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !original.isEmpty, !translation.isEmpty else { throw VocabularyError.emptyTranslation }
-        let key = Self.duplicateKey(original)
-        if let existing = book.savedWords.first(where: { Self.duplicateKey($0.originalText) == key }) {
-            // Keep any translation the reader has edited. Duplicates are scoped to this book.
+        let key = Self.duplicateKey(original, language: sourceLanguage)
+        if let existing = book.savedWords.first(where: {
+            Self.duplicateKey($0.originalText, language: sourceLanguage) == key &&
+                $0.sourceLanguage == sourceLanguage && $0.targetLanguage == targetLanguage
+        }) {
+            // Keep edited translations. Duplicates are scoped to the book and language pair.
             return .existing(existing)
         }
         let word = SavedWord(originalText: original, translatedText: translation,
-                             originalSentence: sentence, book: book)
+                             originalSentence: sentence, book: book,
+                             sourceLanguage: sourceLanguage, targetLanguage: targetLanguage)
         context.insert(word)
         book.updatedAt = .now
         do { try context.save(); return .inserted(word) }
