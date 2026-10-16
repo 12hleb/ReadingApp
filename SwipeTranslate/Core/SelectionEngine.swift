@@ -50,6 +50,7 @@ struct TextSelection: Equatable {
 enum SelectionEngine {
     static func select(from anchor: Int, through focus: Int, page: OCRPage) -> TextSelection? {
         guard page.words.indices.contains(anchor), page.words.indices.contains(focus) else { return nil }
+        guard page.words[anchor].columnIndex == page.words[focus].columnIndex else { return nil }
         let lower = min(anchor, focus), upper = max(anchor, focus)
         let selected = page.words[lower...upper]
         let start = page.words[lower].range.location
