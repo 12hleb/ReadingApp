@@ -1,12 +1,28 @@
 import Vision
 import NaturalLanguage
 import CoreGraphics
+import ImageIO
+
+enum ReaderImageDecoder {
+    /// Downsample before decoding large camera/library images. Apply EXIF rotation
+    /// once so the displayed photo and Vision's word boxes use identical pixels.
+    static func decode(_ data: Data, maxDimension: Int = 4096) throws -> CGImage {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxDimension,
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else { throw CocoaError(.fileReadCorruptFile) }
+        return image
+    }
+}
 
 enum OCRService {
-    static func recognize(_ image: CGImage, accurate: Bool = true) throws -> OCRPage {
+    static func recognize(_ image: CGImage, accurate: Bool = true, language: ReaderLanguage = .english) throws -> OCRPage {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = accurate ? .accurate : .fast
-        request.recognitionLanguages = ["en-US"]
+        request.recognitionLanguages = [language.recognitionIdentifier]
         request.usesLanguageCorrection = true
         request.minimumTextHeight = 0.008
         try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
@@ -15,7 +31,7 @@ enum OCRService {
             let text = candidate.string
             let tokenizer = NLTokenizer(unit: .word)
             tokenizer.string = text
-            tokenizer.setLanguage(.english)
+            tokenizer.setLanguage(NLLanguage(rawValue: language.rawValue))
             var tokens: [RecognizedToken] = []
             tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
                 // Some Vision revisions cannot resolve a particular word. Skip that word
@@ -34,7 +50,7 @@ enum OCRService {
             let continuousText = text.replacingOccurrences(of: "\n", with: " ")
             let tokenizer = NLTokenizer(unit: .sentence)
             tokenizer.string = continuousText
-            tokenizer.setLanguage(.english)
+            tokenizer.setLanguage(NLLanguage(rawValue: language.rawValue))
             var ranges: [NSRange] = []
             tokenizer.enumerateTokens(in: continuousText.startIndex..<continuousText.endIndex) { range, _ in
                 ranges.append(NSRange(range, in: continuousText)); return true
@@ -46,7 +62,8 @@ enum OCRService {
     static func suggestTitle(in image: CGImage) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["en-US"]
+        request.recognitionLanguages = ReaderLanguage.allCases.map(\.recognitionIdentifier)
+        request.automaticallyDetectsLanguage = true
         request.usesLanguageCorrection = true
         try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
         let candidates = (request.results ?? []).filter { ($0.topCandidates(1).first?.confidence ?? 0) >= 0.3 }
