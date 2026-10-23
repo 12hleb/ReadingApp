@@ -1,8 +1,9 @@
 import AVFoundation
-import CoreImage
+import CoreGraphics
 import Observation
 
 struct CameraFrame {
+    let id = UUID()
     let image: CGImage
     let page: OCRPage
     var size: CGSize { CGSize(width: CGFloat(image.width), height: CGFloat(image.height)) }
@@ -13,34 +14,40 @@ enum CameraStatus: Equatable {
     case interrupted(String), failed(String)
 }
 
+enum CameraCaptureError: LocalizedError {
+    case notReady, missingPhoto
+    var errorDescription: String? {
+        switch self {
+        case .notReady: "The camera isn’t ready. Please try again."
+        case .missingPhoto: "The photo couldn’t be captured. Please try again."
+        }
+    }
+}
+
 @MainActor @Observable
 final class CameraService {
-    var status: CameraStatus = .idle
-    var latestFrame: CameraFrame?
-    var ocrWarning: String?
+    private(set) var status: CameraStatus = .idle
+    private(set) var supportsLight = false
+    private(set) var isLightOn = false
+    private(set) var isChangingLight = false
+    var lightError: String?
     @ObservationIgnored private let worker = CameraWorker()
     @ObservationIgnored private var wantsCamera = false
     @ObservationIgnored private var generation = 0
     var session: AVCaptureSession { worker.session }
 
     init() {
-        worker.onFrame = { [weak self] frame, generation in
+        worker.onLightSupport = { [weak self] supported, generation in
             Task { @MainActor in
                 guard let self, self.wantsCamera, self.generation == generation else { return }
-                self.latestFrame = frame
-                self.ocrWarning = nil
+                self.supportsLight = supported
             }
         }
         worker.onStatus = { [weak self] status, generation in
             Task { @MainActor in
                 guard let self, self.wantsCamera, self.generation == generation else { return }
                 self.status = status
-            }
-        }
-        worker.onOCRFailure = { [weak self] generation in
-            Task { @MainActor in
-                guard let self, self.wantsCamera, self.generation == generation else { return }
-                self.ocrWarning = "Text couldn’t be read. Hold the page steady in brighter light."
+                if status != .running { self.isLightOn = false }
             }
         }
     }
@@ -60,39 +67,70 @@ final class CameraService {
         worker.start(generation: generation)
     }
 
+    func capturePhoto() async throws -> Data {
+        guard wantsCamera, status == .running else { throw CameraCaptureError.notReady }
+        let captureGeneration = generation
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            worker.capturePhoto() { continuation.resume(with: $0) }
+        }
+        try Task.checkCancellation()
+        guard wantsCamera, generation == captureGeneration else { throw CancellationError() }
+        return data
+    }
+
+    func toggleLight() async {
+        guard wantsCamera, status == .running, supportsLight, !isChangingLight else { return }
+        let requestGeneration = generation
+        let enabled = !isLightOn
+        isChangingLight = true
+        lightError = nil
+        let result: Result<Bool, Error> = await withCheckedContinuation { continuation in
+            worker.setLight(enabled) { continuation.resume(returning: $0) }
+        }
+        guard generation == requestGeneration else { return }
+        isChangingLight = false
+        switch result {
+        case .success(let enabled): isLightOn = enabled
+        case .failure: lightError = "The camera light is unavailable. Please try again."
+        }
+    }
+
     func stop() {
         wantsCamera = false
+        isLightOn = false
+        isChangingLight = false
+        supportsLight = false
+        lightError = nil
         generation += 1
         worker.stop()
         if status == .running || status == .requesting { status = .idle }
     }
 
-    func retry() async { stop(); latestFrame = nil; await start() }
+    func retry() async { stop(); await start() }
 }
 
-/// Session mutations run on controlQueue; Vision and CIContext run on frameQueue.
-/// Callbacks cross to the main actor in CameraService. No camera work blocks SwiftUI.
-private final class CameraWorker: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
+/// All session changes and capture completion bookkeeping run on controlQueue.
+/// The live camera only previews; text recognition starts after a still photo is captured.
+private final class CameraWorker: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Sendable {
     let session = AVCaptureSession()
-    var onFrame: ((CameraFrame, Int) -> Void)?
+    var onLightSupport: ((Bool, Int) -> Void)?
+    private var device: AVCaptureDevice?
     var onStatus: ((CameraStatus, Int) -> Void)?
-    var onOCRFailure: ((Int) -> Void)?
     private let controlQueue = DispatchQueue(label: "SwipeTranslate.camera.control")
-    private let frameQueue = DispatchQueue(label: "SwipeTranslate.camera.frames", qos: .userInitiated)
-    private let imageContext = CIContext(options: [.cacheIntermediates: false])
-    private var configured = false // controlQueue only
-    private var activeGeneration = 0 // controlQueue only
-    private var frameGeneration = 0 // frameQueue only
-    private var acceptingFrames = false // frameQueue only
-    private var lastScan = -Double.infinity // frameQueue only
+    private let photoOutput = AVCapturePhotoOutput()
+    private var configured = false
+    private var activeGeneration = 0
+    private var captureID: Int64?
+    private var captureResult: Result<Data, Error>?
+    private var completion: ((Result<Data, Error>) -> Void)?
     private var observers: [NSObjectProtocol] = []
 
     override init() {
         super.init()
-        observers.append(NotificationCenter.default.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: nil) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: session, queue: nil) { [weak self] _ in
             self?.report(.interrupted("The camera is temporarily in use or unavailable. Tap Retry when you’re ready."))
         })
-        observers.append(NotificationCenter.default.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: nil) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: AVCaptureSession.runtimeErrorNotification, object: session, queue: nil) { [weak self] _ in
             self?.report(.failed("The camera stopped unexpectedly. Tap Retry to restart it."))
         })
     }
@@ -102,6 +140,8 @@ private final class CameraWorker: NSObject, AVCaptureVideoDataOutputSampleBuffer
     private func report(_ status: CameraStatus) {
         controlQueue.async { [weak self] in
             guard let self else { return }
+            try? self.applyLight(false)
+            self.finishCapture(.failure(CameraCaptureError.notReady))
             self.onStatus?(status, self.activeGeneration)
         }
     }
@@ -112,77 +152,120 @@ private final class CameraWorker: NSObject, AVCaptureVideoDataOutputSampleBuffer
             self.activeGeneration = generation
             do {
                 if !self.configured { try self.configure() }
-                self.frameQueue.async {
-                    self.frameGeneration = generation
-                    self.lastScan = -Double.infinity
-                    self.acceptingFrames = true
-                }
                 if !self.session.isRunning { self.session.startRunning() }
+                self.onLightSupport?(self.device?.hasTorch == true, generation)
                 self.onStatus?(self.session.isRunning ? .running : .failed("The camera couldn’t start. Tap Retry."), generation)
-            } catch {
-                self.onStatus?(.unavailable, generation)
-            }
+            } catch { self.onStatus?(.unavailable, generation) }
         }
     }
 
     func stop() {
         controlQueue.async { [weak self] in
             guard let self else { return }
-            self.frameQueue.async { self.acceptingFrames = false }
+            try? self.applyLight(false)
+            self.finishCapture(.failure(CancellationError()))
             if self.session.isRunning { self.session.stopRunning() }
+        }
+    }
+
+    func setLight(_ enabled: Bool, completion: @escaping (Result<Bool, Error>) -> Void) {
+        controlQueue.async {
+            do {
+                guard self.session.isRunning else { throw CameraCaptureError.notReady }
+                try self.applyLight(enabled)
+                completion(.success(self.device?.torchMode == .on))
+            } catch { completion(.failure(error)) }
+        }
+    }
+
+    private func applyLight(_ enabled: Bool) throws {
+        guard let device, device.hasTorch else {
+            if enabled { throw CameraCaptureError.notReady }
+            return
+        }
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+        if enabled {
+            guard device.isTorchAvailable, device.isTorchModeSupported(.on) else {
+                throw CameraCaptureError.notReady
+            }
+            try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+        } else if device.isTorchModeSupported(.off) {
+            device.torchMode = .off
+        }
+    }
+
+    func capturePhoto(completion: @escaping (Result<Data, Error>) -> Void) {
+        controlQueue.async {
+            guard self.configured, self.session.isRunning, self.captureID == nil,
+                  let connection = self.photoOutput.connection(with: .video), connection.isActive else {
+                completion(.failure(CameraCaptureError.notReady)); return
+            }
+            if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = false
+            }
+            let settings = AVCapturePhotoSettings()
+            self.captureID = settings.uniqueID
+            self.captureResult = nil
+            self.completion = completion
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
         }
     }
 
     private func configure() throws {
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
-            throw CameraSetupError.noCamera
+            throw CameraCaptureError.notReady
         }
         let input = try AVCaptureDeviceInput(device: device)
-        let output = AVCaptureVideoDataOutput()
-        output.alwaysDiscardsLateVideoFrames = true
-        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        output.setSampleBufferDelegate(self, queue: frameQueue)
-
         session.beginConfiguration()
         defer { session.commitConfiguration() }
-        session.sessionPreset = session.canSetSessionPreset(.hd1920x1080) ? .hd1920x1080 : .high
-        guard session.canAddInput(input) else { throw CameraSetupError.noCamera }
+        if session.canSetSessionPreset(.photo) { session.sessionPreset = .photo }
+        guard session.canAddInput(input) else { throw CameraCaptureError.notReady }
         session.addInput(input)
-        guard session.canAddOutput(output) else { session.removeInput(input); throw CameraSetupError.noCamera }
-        session.addOutput(output)
-        guard let connection = output.connection(with: .video), connection.isVideoRotationAngleSupported(90) else {
-            session.removeOutput(output); session.removeInput(input)
-            throw CameraSetupError.noCamera
+        guard session.canAddOutput(photoOutput) else {
+            session.removeInput(input)
+            throw CameraCaptureError.notReady
         }
-        // The app is portrait-only. Physically rotate pixel buffers so Vision, frozen
-        // CGImages, and the portrait preview all share the same upright coordinate space.
-        connection.videoRotationAngle = 90
-        if connection.isVideoMirroringSupported { connection.isVideoMirrored = false }
-        if connection.isVideoStabilizationSupported { connection.preferredVideoStabilizationMode = .off }
+        session.addOutput(photoOutput)
         do {
             try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
             if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
-            device.unlockForConfiguration()
-        } catch { /* Default focus/exposure still allow reading when configuration is busy. */ }
+        } catch { /* Default focus and exposure remain usable. */ }
+        self.device = device
         configured = true
     }
 
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard acceptingFrames else { return }
-        let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-        guard timestamp - lastScan >= 0.85 else { return }
-        lastScan = timestamp
-        guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        autoreleasepool {
-            let ciImage = CIImage(cvPixelBuffer: buffer)
-            guard let image = imageContext.createCGImage(ciImage, from: ciImage.extent) else { return }
-            do {
-                let page = try OCRService.recognize(image)
-                onFrame?(CameraFrame(image: image, page: page), frameGeneration)
-            } catch { onOCRFailure?(frameGeneration) }
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let result: Result<Data, Error>
+        if let error { result = .failure(error) }
+        else if let data = photo.fileDataRepresentation() { result = .success(data) }
+        else { result = .failure(CameraCaptureError.missingPhoto) }
+        let id = photo.resolvedSettings.uniqueID
+        controlQueue.async {
+            guard self.captureID == id else { return }
+            self.captureResult = result
         }
     }
 
-    private enum CameraSetupError: Error { case noCamera }
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        let id = resolvedSettings.uniqueID
+        controlQueue.async {
+            guard self.captureID == id else { return }
+            let result = error.map { Result<Data, Error>.failure($0) }
+                ?? self.captureResult ?? .failure(CameraCaptureError.missingPhoto)
+            self.finishCapture(result)
+        }
+    }
+
+    private func finishCapture(_ result: Result<Data, Error>) {
+        let callback = completion
+        completion = nil
+        captureResult = nil
+        captureID = nil
+        callback?(result)
+    }
 }
