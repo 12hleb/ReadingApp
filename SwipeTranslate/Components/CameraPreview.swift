@@ -18,7 +18,10 @@ struct CameraPreview: UIViewRepresentable {
         func orient() {
             guard let connection = previewLayer.connection else { return }
             if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
-            if connection.isVideoMirroringSupported { connection.isVideoMirrored = false }
+            if connection.isVideoMirroringSupported {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = false
+            }
         }
     }
 }
