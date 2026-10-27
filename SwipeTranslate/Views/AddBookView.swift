@@ -45,7 +45,7 @@ struct AddBookView: View {
             }
             .navigationTitle("Add Book").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-            .sheet(isPresented: $model.showingCamera) { CoverCameraPicker { model.useCover($0) }.ignoresSafeArea() }
+            .fullScreenCover(isPresented: $model.showingCamera) { CoverCameraPicker { model.useCover($0) } }
             .task(id: photo) {
                 guard let photo else { return }
                 let id = UUID()
