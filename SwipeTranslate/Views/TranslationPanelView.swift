@@ -10,25 +10,25 @@ struct TranslationPanelView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Label("English → Russian", systemImage: "character.bubble").font(.subheadline.weight(.medium))
+                    Label(model.translation.languagePairLabel, systemImage: "character.bubble").font(.subheadline.weight(.medium))
                     Spacer()
                     Button("Close", systemImage: "xmark.circle.fill") { dismiss() }
                         .labelStyle(.iconOnly).font(.title3).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("ORIGINAL TEXT").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text("Original · \(model.translation.sourceLanguage.name)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Text(model.selection?.text ?? "Select a word on the page")
                         .font(.system(.title2, design: .serif)).textSelection(.enabled)
                 }
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("RUSSIAN TRANSLATION").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text("Translation · \(model.translation.targetLanguage.name)").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     switch model.translation.state {
                     case .idle:
                         Text("Select text to translate.").foregroundStyle(.secondary)
                     case .loading:
                         ProgressView("Translating…")
-                        Text("If prompted, download the English and Russian languages.")
+                        Text("If prompted, download the \(model.translation.sourceLanguage.name) and \(model.translation.targetLanguage.name) languages.")
                             .font(.caption).foregroundStyle(.secondary)
                     case .translated(let text):
                         Text(text).font(.title2).textSelection(.enabled)

@@ -12,11 +12,11 @@ struct SavedWordDetailView: View {
 
     var body: some View {
         Form {
-            Section("Original · English") {
+            Section("Original · \(word.sourceLanguage.name)") {
                 Text(word.originalText).font(.system(.title, design: .serif)).textSelection(.enabled)
             }
-            Section("Translation · Russian") {
-                TextField("Russian translation", text: $translation, axis: .vertical).lineLimit(2...8)
+            Section("Translation · \(word.targetLanguage.name)") {
+                TextField("\(word.targetLanguage.name) translation", text: $translation, axis: .vertical).lineLimit(2...8)
                 Button(saved ? "Changes Saved" : "Save Changes", systemImage: saved ? "checkmark" : "checkmark.circle") {
                     do { try VocabularyRepository(context: context).update(word, translation: translation); saved = true }
                     catch { self.error = error.localizedDescription }

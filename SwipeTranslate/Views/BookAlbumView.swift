@@ -39,7 +39,7 @@ struct BookAlbumView: View {
                     ContentUnavailableView {
                         Label(search.isEmpty ? "Words worth keeping" : "No matching words", systemImage: search.isEmpty ? "bookmark" : "magnifyingglass")
                     } description: {
-                        Text(search.isEmpty ? "Scan a page and save a word or phrase. It will be waiting here next time." : "Try an English word, Russian translation, or part of a sentence.")
+                        Text(search.isEmpty ? "Scan a page and save a word or phrase. It will be waiting here next time." : "Try an original word, translation, or part of a sentence.")
                     }
                 }
                 ForEach(words) { word in
@@ -47,6 +47,7 @@ struct BookAlbumView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(word.originalText).font(.system(.headline, design: .serif))
                             Text(word.translatedText).foregroundStyle(.secondary)
+                            Text(word.languagePairLabel).font(.caption2).foregroundStyle(.secondary)
                             if let sentence = word.originalSentence {
                                 Text(sentence).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                             }
